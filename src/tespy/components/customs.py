@@ -19,6 +19,7 @@ from tespy.components.components import component
 from tespy.tools.data_containers import dc_cp
 from tespy.tools.data_containers import dc_simple
 from tespy.tools.fluid_properties import dh_mix_dpQ
+from tespy.tools.fluid_properties import T_mix_ph
 from tespy.tools.fluid_properties import h_mix_pQ
 from tespy.tools.fluid_properties import h_mix_pT
 from tespy.tools.fluid_properties import s_mix_ph
@@ -225,6 +226,7 @@ class orc_evaporator(component):
     def attr():
         return {
             'Q': dc_cp(max_val=0),
+            'ttd_u': dc_cp(min_val=0), 'ttd_l': dc_cp(min_val=0),
             'pr1': dc_cp(max_val=1), 'pr2': dc_cp(max_val=1),
             'pr3': dc_cp(max_val=1),
             'zeta1': dc_cp(min_val=0), 'zeta2': dc_cp(min_val=0),
@@ -258,7 +260,7 @@ class orc_evaporator(component):
         # enthalpy cold side outlet (if not overheating): 1
         if self.overheating.val is False:
             self.num_eq += 1
-        for var in [self.Q, self.pr1, self.pr2, self.pr3,
+        for var in [self.Q, self.pr1, self.pr2, self.pr3, self.ttd_u, self.ttd_l,
                     self.zeta1, self.zeta2, self.zeta3, ]:
             if var.is_set is True:
                 self.num_eq += 1
@@ -298,6 +300,18 @@ class orc_evaporator(component):
             self.residual[k] = (
                 self.inl[2].m.val_SI * (
                     self.outl[2].h.val_SI - self.inl[2].h.val_SI) - self.Q.val)
+            k += 1
+
+        ######################################################################
+        # equations for specified upper terminal temperature difference
+        if self.ttd_u.is_set:
+            self.residual[k] = self.ttd_u_func()
+            k += 1
+
+        ######################################################################
+        # equations for specified lower terminal temperature difference
+        if self.ttd_l.is_set:
+            self.residual[k] = self.ttd_l_func()
             k += 1
 
         ######################################################################
@@ -383,6 +397,28 @@ class orc_evaporator(component):
                     self.outl[2].h.val_SI - self.inl[2].h.val_SI)
             self.jacobian[k, 2, 2] = -self.inl[2].m.val_SI
             self.jacobian[k, 5, 2] = self.inl[2].m.val_SI
+            k += 1
+
+        ######################################################################
+        # derivatives for specified upper terminal temperature difference
+        if self.ttd_u.is_set:
+            f = self.ttd_u_func
+            for i in [1, 5]:
+                if not increment_filter[i, 1]:
+                    self.jacobian[k, i, 1] = self.numeric_deriv(f, 'p', i)
+                if not increment_filter[i, 2]:
+                    self.jacobian[k, i, 2] = self.numeric_deriv(f, 'h', i)
+            k += 1
+
+        ######################################################################
+        # derivatives for specified lower terminal temperature difference
+        if self.ttd_l.is_set:
+            f = self.ttd_l_func
+            for i in [2, 4]:
+                if not increment_filter[i, 1]:
+                    self.jacobian[k, i, 1] = self.numeric_deriv(f, 'p', i)
+                if not increment_filter[i, 2]:
+                    self.jacobian[k, i, 2] = self.numeric_deriv(f, 'h', i)
             k += 1
 
         ######################################################################
@@ -547,6 +583,42 @@ class orc_evaporator(component):
             self.inl[2].m.val_SI * (
                 self.outl[2].h.val_SI - self.inl[2].h.val_SI))
 
+    def ttd_u_func(self):
+        r"""
+        Equation for upper terminal temperature difference.
+
+        Returns
+        -------
+        res : float
+            Residual value of equation.
+
+            .. math::
+
+                res = ttd_{u} - T_{1,in} + T_{2,out}
+        """
+
+        T_i2 = T_mix_ph(self.inl[1].to_flow(), T0=self.inl[1].T.val_SI)
+        T_o3 = T_mix_ph(self.outl[2].to_flow(), T0=self.outl[2].T.val_SI)
+        return self.ttd_u.val - T_i2 + T_o3
+
+    def ttd_l_func(self):
+        r"""
+        Equation for upper terminal temperature difference.
+
+        Returns
+        -------
+        res : float
+            Residual value of equation.
+
+            .. math::
+
+                res = ttd_{l} - T_{2,out} + T_{3,in}
+        """
+        i3 = self.inl[2].to_flow()
+        o2 = self.outl[1].to_flow()
+        return (self.ttd_l.val - T_mix_ph(o2, T0=self.outl[1].T.val_SI) +
+                T_mix_ph(i3, T0=self.inl[2].T.val_SI))
+
     def bus_func(self, bus):
         r"""
         Calculate the value of the bus function.
@@ -710,6 +782,12 @@ class orc_evaporator(component):
 
         # component parameters
         self.Q.val = -i3[0] * (o3[2] - i3[2])
+        T_i2 = T_mix_ph(i2, T0=self.inl[0].T.val_SI)
+        T_i3 = T_mix_ph(i3, T0=self.inl[1].T.val_SI)
+        T_o2 = T_mix_ph(o2, T0=self.outl[0].T.val_SI)
+        T_o3 = T_mix_ph(o3, T0=self.outl[1].T.val_SI)
+        self.ttd_u.val = T_i2 - T_o3
+        self.ttd_l.val = T_o2 - T_i3
 
         self.pr1.val = o1[1] / i1[1]
         self.pr2.val = o2[1] / i2[1]
